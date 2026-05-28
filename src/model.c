@@ -530,6 +530,56 @@ static void emit_microbatch_bwd(opbuf_t *ob, const stagecost_t *c, uint16_t mb) 
  *  per-rank plan
  * ====================================================================== */
 
+/* rank coordinate: TP innermost (kept intra-rack), then CP, PP, DP. */
+uint32_t cai_rank_stage(const cai_decomp_t *dec, uint32_t rank) {
+    return (uint32_t)((rank / ((uint64_t)dec->tp * dec->cp)) % dec->pp);
+}
+
+void cai_rank_groups(const cai_decomp_t *dec, const cai_topology_t *topo, int is_moe,
+                     uint32_t rank, cai_comm_group_t groups[CAI_GROUP_COUNT],
+                     uint32_t *ng_out) {
+    uint32_t tp = dec->tp, pp = dec->pp, cp = dec->cp, dp = dec->dp, ep = dec->ep;
+    uint64_t replica = (uint64_t)tp * pp * cp;
+    uint32_t tp_id = rank % tp;
+    uint32_t cp_id = (rank / tp) % cp;
+    uint32_t dp_id = (uint32_t)(rank / replica);
+    uint32_t within = (uint32_t)(rank % replica);
+    uint32_t ng = 0;
+
+    uint32_t tp_first = rank - tp_id;
+    groups[ng].group_id = ng;
+    groups[ng].kind = CAI_GROUP_TP;
+    groups[ng].size = tp;
+    groups[ng].color = tp_first;
+    groups[ng].intra_rack = cai_same_rack(topo, tp_first, tp_first + tp - 1) ? 1 : 0;
+    ng++;
+
+    groups[ng].group_id = ng;
+    groups[ng].kind = CAI_GROUP_DP;
+    groups[ng].size = dp;
+    groups[ng].color = within;
+    groups[ng].intra_rack =
+        (dp > 1 && cai_same_rack(topo, within, within + (dp - 1) * replica)) ? 1 : 0;
+    ng++;
+
+    groups[ng].group_id = ng;
+    groups[ng].kind = CAI_GROUP_PP;
+    groups[ng].size = pp;
+    groups[ng].color = dp_id * (tp * cp) + cp_id * tp + tp_id;
+    groups[ng].intra_rack = 0;
+    ng++;
+
+    if (is_moe && ep > 1) {
+        groups[ng].group_id = ng;
+        groups[ng].kind = CAI_GROUP_EP;
+        groups[ng].size = ep;
+        groups[ng].color = within + (dp_id / ep) * ep * (uint32_t)replica;
+        groups[ng].intra_rack = 0;
+        ng++;
+    }
+    *ng_out = ng;
+}
+
 int cai_build_plan(const cai_config_t *cfg, const cai_decomp_t *dec, uint32_t rank,
                    uint64_t plan_hash, uint64_t topo_hash, cai_plan_t *out,
                    char *err, size_t errlen) {
@@ -543,15 +593,7 @@ int cai_build_plan(const cai_config_t *cfg, const cai_decomp_t *dec, uint32_t ra
     }
 
     uint32_t tp = dec->tp, pp = dec->pp, cp = dec->cp, dp = dec->dp, ep = dec->ep;
-    uint64_t replica = (uint64_t)tp * pp * cp;
-
-    /* rank coordinate: TP innermost (kept intra-rack), then CP, PP, DP */
-    uint32_t tp_id = rank % tp;
-    uint32_t cp_id = (rank / tp) % cp;
-    uint32_t pp_id = (uint32_t)((rank / ((uint64_t)tp * cp)) % pp);
-    uint32_t dp_id = (uint32_t)(rank / replica);
-    uint32_t stage = pp_id;
-
+    uint32_t stage = cai_rank_stage(dec, rank);
     uint32_t base = m->num_layers / pp, rem = m->num_layers % pp;
     uint32_t layers = base + (stage < rem ? 1 : 0);
 
@@ -589,42 +631,7 @@ int cai_build_plan(const cai_config_t *cfg, const cai_decomp_t *dec, uint32_t ra
     /* comm groups */
     cai_comm_group_t groups[CAI_GROUP_COUNT];
     uint32_t ng = 0;
-    {
-        uint32_t tp_first = rank - tp_id;
-        groups[ng].group_id = ng;
-        groups[ng].kind = CAI_GROUP_TP;
-        groups[ng].size = tp;
-        groups[ng].color = tp_first;
-        groups[ng].intra_rack =
-            cai_same_rack(&topo, tp_first, tp_first + tp - 1) ? 1 : 0;
-        ng++;
-
-        uint32_t within = (uint32_t)(rank % replica);
-        groups[ng].group_id = ng;
-        groups[ng].kind = CAI_GROUP_DP;
-        groups[ng].size = dp;
-        groups[ng].color = within;
-        groups[ng].intra_rack =
-            (dp > 1 && cai_same_rack(&topo, within, within + (dp - 1) * replica)) ? 1 : 0;
-        ng++;
-
-        uint32_t pp_color = dp_id * (tp * cp) + cp_id * tp + tp_id;
-        groups[ng].group_id = ng;
-        groups[ng].kind = CAI_GROUP_PP;
-        groups[ng].size = pp;
-        groups[ng].color = pp_color;
-        groups[ng].intra_rack = 0;
-        ng++;
-
-        if (m->is_moe && ep > 1) {
-            groups[ng].group_id = ng;
-            groups[ng].kind = CAI_GROUP_EP;
-            groups[ng].size = ep;
-            groups[ng].color = within + (dp_id / ep) * ep * (uint32_t)replica;
-            groups[ng].intra_rack = 0;
-            ng++;
-        }
-    }
+    cai_rank_groups(dec, &topo, m->is_moe, rank, groups, &ng);
 
     /* per-microbatch costs */
     stagecost_t c;

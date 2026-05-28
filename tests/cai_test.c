@@ -280,10 +280,47 @@ static void test_ep_memory(void) {
           (unsigned long long)d2.mem_param, (unsigned long long)d36.mem_param);
 }
 
+static void check_tiling(const cai_decomp_t *d, const cai_topology_t *t, int moe,
+                         uint16_t kind, const char *name) {
+    uint32_t W = t->world_size, *cnt = calloc(W, sizeof(uint32_t)), size = 0;
+    for (uint32_t r = 0; r < W; r++) {
+        cai_comm_group_t gs[CAI_GROUP_COUNT];
+        uint32_t ng = 0;
+        cai_rank_groups(d, t, moe, r, gs, &ng);
+        for (uint32_t i = 0; i < ng; i++)
+            if (gs[i].kind == kind) {
+                size = gs[i].size;
+                CHECK(gs[i].color < W, "%s color in range", name);
+                cnt[gs[i].color]++;
+            }
+    }
+    uint64_t total = 0;
+    int buckets = 0, bad = 0;
+    for (uint32_t c = 0; c < W; c++)
+        if (cnt[c]) { buckets++; total += cnt[c]; if (cnt[c] != size) bad++; }
+    CHECK(bad == 0 && total == W && (uint64_t)buckets * size == W,
+          "%s tiles world (buckets=%d size=%u)", name, buckets, size);
+    free(cnt);
+}
+
+static void test_grouptiling(void) {
+    printf("[group-tiling]\n");
+    cai_config_t cfg;
+    make_small(&cfg);
+    char e[128];
+    cai_topology_finalize(&cfg.topo, e, sizeof(e));
+    cai_decomp_t d;
+    cai_decompose(&cfg, &d, e, sizeof(e));
+    check_tiling(&d, &cfg.topo, 0, CAI_GROUP_TP, "TP");
+    check_tiling(&d, &cfg.topo, 0, CAI_GROUP_DP, "DP");
+    check_tiling(&d, &cfg.topo, 0, CAI_GROUP_PP, "PP");
+}
+
 int main(void) {
     cai_log_set_level(CAI_LOG_ERROR); /* quiet */
     test_costmodel();
     test_ep_memory();
+    test_grouptiling();
     test_topology();
     test_arena();
     test_pipeline();

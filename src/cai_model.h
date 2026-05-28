@@ -89,6 +89,14 @@ int cai_build_plan(const cai_config_t *cfg, const cai_decomp_t *dec,
                    uint32_t rank, uint64_t plan_hash, uint64_t topo_hash,
                    cai_plan_t *out, char *err, size_t errlen);
 
+/* Communicator groups a rank belongs to (cheap; no op-table). topo finalized. */
+void cai_rank_groups(const cai_decomp_t *dec, const cai_topology_t *topo, int is_moe,
+                     uint32_t rank, cai_comm_group_t groups[CAI_GROUP_COUNT],
+                     uint32_t *ng_out);
+
+/* Pipeline stage owning a rank. */
+uint32_t cai_rank_stage(const cai_decomp_t *dec, uint32_t rank);
+
 /* Stable hash of the logical plan (independent of which rank). */
 uint64_t cai_plan_hash(const cai_config_t *cfg, const cai_decomp_t *dec);
 uint64_t cai_topology_hash(const cai_topology_t *topo);
