@@ -334,8 +334,31 @@ static void test_grouptiling(void) {
     check_tiling(&d, &cfg.topo, 0, CAI_GROUP_PP, "PP");
 }
 
+static void test_spare(void) {
+    printf("[spare-rank]\n");
+    cai_topology_t t;
+    cai_topology_default(&t);
+    t.num_racks = 2;
+    t.spare_gpus = 8; /* world=136, total=144, spares [136,144) */
+    char e[128];
+    cai_topology_finalize(&t, e, sizeof(e));
+    uint32_t s = 0;
+    CHECK(cai_spare_rank(&t, 0, &s) == CAI_OK && s >= 136 && s < 144,
+          "spare for rank 0 = %u", s);
+    CHECK(s / t.gpus_per_rack != 0, "spare for rack-0 rank is in another rack");
+    CHECK(cai_spare_rank(&t, 80, &s) == CAI_OK, "spare for a rack-1 rank ok");
+
+    cai_topology_t t2;
+    cai_topology_default(&t2);
+    t2.num_racks = 1;
+    t2.spare_gpus = 0;
+    cai_topology_finalize(&t2, e, sizeof(e));
+    CHECK(cai_spare_rank(&t2, 0, &s) == CAI_ERR_INVALID, "no spares -> error");
+}
+
 int main(void) {
     cai_log_set_level(CAI_LOG_ERROR); /* quiet */
+    test_spare();
     test_costmodel();
     test_ep_memory();
     test_grouptiling();

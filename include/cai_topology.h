@@ -64,4 +64,9 @@ int cai_same_rack(const cai_topology_t *t, uint32_t a, uint32_t b);
 int cai_topology_write(const char *path, const cai_topology_t *t);
 int cai_topology_read(const char *path, cai_topology_t *t);
 
+/* Pick a spare physical GPU (in [world_size, gpus_per_rack*num_racks)) to take
+ * over a failed rank, preferring a different rack so a rack failure can't claim
+ * both. Returns CAI_OK and writes the spare into out, or an error if no spare. */
+int cai_spare_rank(const cai_topology_t *t, uint32_t failed_rank, uint32_t *out);
+
 #endif /* CAI_TOPOLOGY_H */

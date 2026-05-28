@@ -19,6 +19,9 @@ Everything implementable without a GPU is done and tested:
   tiling, hash agreement, intra-stage op identity, pipeline p2p conservation) in ~17 ms.
 - **Higher-fidelity simulator**: alpha-beta collective cost; EP-aware MoE memory;
   per-op trace + per-stream occupancy telemetry.
+- **Interleaved 1F1B** (`vpp`): planning-level virtual pipeline (bubble 14.3%→7.7% at vpp=2).
+- **Spare-rank recovery**: `plan_recover` hot-swaps a failed rank onto a spare GPU in
+  another rack, emitting the identical replacement plan.
 
 What remains (M2–M6 device paths, P1–P3) is **gated on real hardware** — a CUDA
 toolchain and ultimately a GB300 cluster — and is marked 🔒 below.
@@ -61,11 +64,11 @@ utilization telemetry, pod-level checkpoint restore, failure injection.
 *Exit:* measured pipeline bubble within the model's prediction; stage imbalance is
 detectable; restore from checkpoint at pod granularity.
 
-### M5 — Pod scale 🔒
-Hierarchical launcher + control plane, DP reduce-scatter/all-gather at scale, MoE
-all-to-all, spare-rank recovery, straggler detection.
-*Exit:* per-pod goodput beats the baseline; auto-recovery after injected failure;
-checkpoint pause does not dominate the step; stragglers isolated. → unlocks **P2**.
+### M5 — Pod scale  recovery-planning ✅ · run 🔒
+*Done (no GPU):* spare-rank recovery planning via `plan_recover` — picks a spare GPU
+(preferring another rack) and regenerates the failed rank's identical plan.
+*Needs GPU:* hierarchical launcher + control plane, DP reduce-scatter/all-gather at
+scale, MoE all-to-all, straggler detection, auto-recovery on injected failure. → P2.
 
 ### M6 — Full 220k-class  validation ✅ · run 🔒
 *Done (no GPU):* full-topology plan generation; **pre-launch validation** via
@@ -85,7 +88,7 @@ All performance tiers are 🔒 (need real GPUs to measure); the simulator alread
 | tier | unlocked by | levers | target |
 |---|---|---|---|
 | **P1** | M2–M3 | static memory + CUDA Graphs + topology-aware mapping + comm/compute overlap | 1.3–2.5x goodput vs an optimized JAX baseline |
-| **P2** | M4–M5 | custom fused kernels + pipeline optimization (interleaved / zero-bubble 1F1B) | 3–5x |
+| **P2** | M4–M5 | custom fused kernels + pipeline optimization (interleaved 1F1B *modeled*; kernels need GPU) | 3–5x |
 | **P3** | post-M6 | megakernels + GPU-initiated scheduler (NVSHMEM) + model/topology co-design | >5x under the right conditions |
 
 10x is **not** "because it's C" — it is the compound effect of throwing away
@@ -106,8 +109,8 @@ generality and fully specializing to the physical layout of 220k GB300s.
 - **Communication** 🔒 — NCCL for bulk collectives → NVSHMEM for fine-grained
   pipeline / expert routing → cluster-specific custom collectives.
 - **Fault tolerance** 🚧 — checkpoint save/restore + rolling "latest" pointer +
-  topology-hash guard exist; async / two-phase commit / spare-rank substitution
-  need the device runtime.
+  topology-hash guard + spare-rank recovery planning (`plan_recover`) exist; async /
+  two-phase commit and live substitution need the device runtime.
 
 ---
 

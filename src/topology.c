@@ -83,6 +83,20 @@ int cai_same_rack(const cai_topology_t *t, uint32_t a, uint32_t b) {
     return a / t->gpus_per_rack == b / t->gpus_per_rack;
 }
 
+int cai_spare_rank(const cai_topology_t *t, uint32_t failed_rank, uint32_t *out) {
+    uint64_t total = (uint64_t)t->gpus_per_rack * t->num_racks;
+    if (t->world_size >= total) return CAI_ERR_INVALID; /* no spares */
+    if (failed_rank >= t->world_size) return CAI_ERR_INVALID;
+    uint32_t frack = failed_rank / t->gpus_per_rack;
+    for (uint32_t s = t->world_size; s < total; s++)
+        if (s / t->gpus_per_rack != frack) {
+            *out = s;
+            return CAI_OK;
+        }
+    *out = t->world_size; /* all spares share the failed rack; take the first */
+    return CAI_OK;
+}
+
 int cai_topology_write(const char *path, const cai_topology_t *t) {
     FILE *f = fopen(path, "wb");
     if (!f) return CAI_ERR_IO;

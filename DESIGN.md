@@ -162,7 +162,9 @@ The per-GPU memory estimate assumes FSDP/ZeRO-3 sharding and is checked against 
 | fp64 correctness oracle (real fwd/bwd/AdamW) | `src/refmodel.c` |
 | real CPU training demo | `tools/reftrain.c` |
 | whole-cluster pre-launch validator | `tools/plan_verify.c` |
+| spare-rank recovery planner | `tools/plan_recover.c` (`cai_spare_rank`) |
 | per-op trace + per-stream occupancy | `src/runtime.c` (`cai_trace_*`) |
+| interleaved 1F1B (virtual pipeline) | `vpp` in `src/pipeline.c` / `src/model.c` |
 
 ## 8. V1.0 approximations and TODO
 

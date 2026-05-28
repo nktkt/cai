@@ -16,7 +16,7 @@ LIB_SRC := $(wildcard src/*.c)
 LIB_OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(LIB_SRC))
 LIB     := $(BUILD)/libcai.a
 
-TOOLS   := plan_compiler topology_linter trainer reftrain plan_verify
+TOOLS   := plan_compiler topology_linter trainer reftrain plan_verify plan_recover
 TOOLBIN := $(addprefix $(BIN)/,$(TOOLS))
 TESTBIN := $(BIN)/cai_test
 

@@ -74,6 +74,9 @@ bin/plan_verify configs/full220k.cfg
 
 # 5) actually train (real fp64 transformer) on CPU and watch loss fall
 bin/reftrain --steps 400
+
+# 6) hot-swap a failed rank onto a spare GPU (regenerates its identical plan)
+bin/plan_recover configs/full220k.cfg 12345 out/recover   # needs spare_gpus > 0
 ```
 
 ## Bundled configs
@@ -106,7 +109,7 @@ dtype names: `fp32 bf16 fp16 fp8e4m3 fp8e5m2 int32 uint8`
 include/   public headers (cai.h, cai_plan.h, cai_topology.h, cai_tensor.h)
 src/       library: topology, arena, model/op-table, pipeline, plan_io,
            runtime, backend_cpu, backend_cuda (stub), refmodel, common
-tools/     plan_compiler, topology_linter, trainer, plan_verify, reftrain
+tools/     plan_compiler, topology_linter, trainer, plan_verify, reftrain, plan_recover
 tests/     cai_test
 configs/   small / full220k / full220k_moe
 ```
