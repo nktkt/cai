@@ -159,6 +159,10 @@ The per-GPU memory estimate assumes FSDP/ZeRO-3 sharding and is checked against 
 | CPU analytic backend | `src/backend_cpu.c` |
 | CUDA backend (stub) | `src/backend_cuda.c` |
 | io / hash / log / fmt | `src/common.c` |
+| fp64 correctness oracle (real fwd/bwd/AdamW) | `src/refmodel.c` |
+| real CPU training demo | `tools/reftrain.c` |
+| whole-cluster pre-launch validator | `tools/plan_verify.c` |
+| per-op trace + per-stream occupancy | `src/runtime.c` (`cai_trace_*`) |
 
 ## 8. V1.0 approximations and TODO
 

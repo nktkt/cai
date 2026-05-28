@@ -13,9 +13,11 @@ them, and replay the schedule to estimate performance — runs on a laptop.
 See [DESIGN.md](DESIGN.md) for the full design and [ROADMAP.md](ROADMAP.md) for the
 path from this scaffold to a real 220k trainer.
 
-> Status: V1.0 scaffold. The offline compiler, topology mapping, static schedule,
-> memory arena, and op-table runtime are real, tested C. The on-device CUDA
-> backend is stubbed (see `src/backend_cuda.c`).
+> Status: the offline compiler, topology mapping, static schedule, memory arena,
+> op-table runtime, a finite-difference-verified fp64 reference trainer (real
+> learning on CPU), and a whole-cluster pre-launch validator are real, tested C.
+> The on-device CUDA backend is stubbed (see `src/backend_cuda.c`); see
+> [ROADMAP.md](ROADMAP.md) for what's gated on real GPUs.
 
 ## What it does
 
@@ -31,9 +33,14 @@ The system splits cleanly into an **offline compiler** and a **dumb runtime**:
 3. `topology_linter` catches the failures that are catastrophic at scale before
    you compile 220k plans: indivisible world size, tensor-parallel groups that
    spill across NVLink domains, oversized per-GPU memory, bad rank↔location math.
+4. `plan_verify` proves, across **all** ranks, that every communicator tiles the
+   world exactly, all ranks agree on `plan_hash`/`topology_hash`, ranks in a stage
+   emit identical op streams, and pipeline send/recv is conserved.
 
-Plans embed a `topology_hash`/`plan_hash`; the runtime refuses a plan that was
-compiled for a different cluster.
+Separately, `refmodel` + `reftrain` are a real fp64 transformer trainer (forward,
+backward, AdamW) that actually learns on CPU — the correctness oracle for the
+eventual on-device path. Plans embed a `topology_hash`/`plan_hash`; the runtime
+refuses a plan that was compiled for a different cluster.
 
 ## Build & run
 
@@ -60,6 +67,13 @@ bin/plan_compiler configs/full220k.cfg out/full --rank 128 # a specific rank
 # 3) replay a plan through the runtime (CPU analytic backend)
 bin/trainer out/full/plan.rank000000.bin out/full/topology.bin --steps 5
 bin/trainer out/full/plan.rank000000.bin out/full/topology.bin --steps 8 --ckpt /tmp/ck
+bin/trainer out/full/plan.rank000000.bin out/full/topology.bin --trace /tmp/trace.csv
+
+# 4) verify the whole cluster's plans agree, before launch (no GPU)
+bin/plan_verify configs/full220k.cfg
+
+# 5) actually train (real fp64 transformer) on CPU and watch loss fall
+bin/reftrain --steps 400
 ```
 
 ## Bundled configs
@@ -91,8 +105,8 @@ dtype names: `fp32 bf16 fp16 fp8e4m3 fp8e5m2 int32 uint8`
 ```
 include/   public headers (cai.h, cai_plan.h, cai_topology.h, cai_tensor.h)
 src/       library: topology, arena, model/op-table, pipeline, plan_io,
-           runtime, backend_cpu, backend_cuda (stub), common
-tools/     plan_compiler, topology_linter, trainer
+           runtime, backend_cpu, backend_cuda (stub), refmodel, common
+tools/     plan_compiler, topology_linter, trainer, plan_verify, reftrain
 tests/     cai_test
 configs/   small / full220k / full220k_moe
 ```

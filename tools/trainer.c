@@ -24,6 +24,7 @@ int main(int argc, char **argv) {
     desc.topology_path = argv[2];
     desc.max_steps = 10;
     desc.checkpoint_every = 0;
+    const char *trace_path = NULL;
 
     for (int i = 3; i < argc; i++) {
         if (!strcmp(argv[i], "--steps") && i + 1 < argc)
@@ -31,6 +32,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--ckpt") && i + 1 < argc) {
             desc.checkpoint_path = argv[++i];
             desc.checkpoint_every = 5;
+        } else if (!strcmp(argv[i], "--trace") && i + 1 < argc) {
+            trace_path = argv[++i];
         } else {
             fprintf(stderr, "unknown arg: %s\n", argv[i]);
             return 2;
@@ -44,6 +47,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (desc.checkpoint_path) cai_load_checkpoint(ctx, desc.checkpoint_path);
+    if (trace_path) cai_trace_enable(ctx, 1);
 
     printf("step | step_time | bubble |   MFU  | tokens/s    | tok/s/gpu\n");
     printf("-----+-----------+--------+--------+-------------+----------\n");
@@ -79,6 +83,16 @@ int main(int argc, char **argv) {
                "arena %.2f GiB/gpu\n",
                n, sum_mfu / n * 100.0, sum_tps / n,
                st.arena_bytes / (1024.0 * 1024.0 * 1024.0));
+        static const char *snames[] = {"compute_hi", "compute_lo", "comm_tp",
+                                       "comm_pp",    "comm_dp",    "io"};
+        printf("per-stream occupancy (ms): ");
+        for (int s = 0; s < CAI_STREAM_COUNT; s++)
+            printf("%s=%.1f ", snames[s], st.stream_busy[s] * 1e3);
+        printf("\n");
+    }
+    if (trace_path) {
+        if (cai_trace_dump_csv(ctx, trace_path) == CAI_OK)
+            printf("wrote op timeline to %s\n", trace_path);
     }
     cai_finalize(ctx);
     return 0;

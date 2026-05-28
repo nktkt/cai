@@ -40,16 +40,18 @@ $(TESTBIN): tests/cai_test.c $(LIB) | $(BIN)
 test: $(TESTBIN)
 	./$(TESTBIN)
 
-# End-to-end: compile plans with no GPU, then replay them through the simulator.
+# End-to-end: everything that runs with no GPU.
 demo: tools
 	@echo "== lint full220k =="
 	./$(BIN)/topology_linter configs/full220k.cfg
-	@echo "== compile 1-rack toy (all 72 ranks) =="
-	./$(BIN)/plan_compiler configs/small.cfg out/small --all
+	@echo "== verify all 220,032 ranks pre-launch =="
+	./$(BIN)/plan_verify configs/full220k.cfg
 	@echo "== compile 220,032-GPU sample =="
 	./$(BIN)/plan_compiler configs/full220k.cfg out/full
 	@echo "== replay stage-0 of the 220k plan =="
 	./$(BIN)/trainer out/full/plan.rank000000.bin out/full/topology.bin --steps 5
+	@echo "== actually train a real transformer on CPU =="
+	./$(BIN)/reftrain --steps 400
 
 $(BUILD) $(BIN):
 	mkdir -p $@

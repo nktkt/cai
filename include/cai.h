@@ -56,7 +56,24 @@ typedef struct {
     double tokens_per_s;    /* global tokens / step_time */
     double tokens_per_s_per_gpu;
     uint64_t arena_bytes;
+    double stream_busy[CAI_STREAM_COUNT]; /* per-stream occupancy (seconds) */
 } cai_step_stats_t;
+
+/* One simulated op interval, for tracing / Chrome-trace style timelines. */
+typedef struct {
+    uint32_t op_index;
+    uint16_t kind;   /* cai_op_kind_t */
+    uint16_t stream; /* cai_stream_t */
+    double start_s;
+    double end_s;
+    uint64_t bytes;
+    uint64_t flops;
+} cai_trace_rec_t;
+
+/* Capture the per-op timeline of each train_step (off by default). */
+int cai_trace_enable(cai_context_t *ctx, int on);
+/* Dump the most recent step's timeline as CSV. */
+int cai_trace_dump_csv(cai_context_t *ctx, const char *path);
 
 int cai_init(cai_context_t **ctx, const cai_init_desc_t *desc);
 int cai_load_plan(cai_context_t *ctx, const char *path);

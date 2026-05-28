@@ -1,15 +1,27 @@
 # Roadmap
 
-cai today is a **GPU-free scaffold**: the offline compiler, the analytic runtime,
-the plan/topology formats, and the tooling are real and tested, but no training
-math runs on a device yet. This roadmap is the path from that scaffold to a real
-trainer sustaining goodput on a 220k-GB300-class cluster.
+This roadmap is the path from the current code to a real trainer sustaining
+goodput on a 220k-GB300-class cluster.
 
 Two axes run in parallel:
 - **Scale** (M0→M6): correctness from one GPU up to the full cluster.
 - **Performance** (P1→P3): the speedup tiers layered on top.
 
-Legend: ✅ done · 🚧 in progress · ⬜ planned
+Legend: ✅ done · 🚧 in progress · ⬜ planned · 🔒 needs real GPUs (can't run here)
+
+## Status (this build)
+
+Everything implementable without a GPU is done and tested:
+- **Real training works** on CPU: `refmodel` is a dense transformer with fp64
+  forward/backward/AdamW, its backward **verified against finite differences**
+  (L2 rel err ~3e-5); `reftrain` learns a real task to 100% held-out accuracy.
+- **Whole-cluster validation**: `plan_verify` checks all 220,032 ranks (communicator
+  tiling, hash agreement, intra-stage op identity, pipeline p2p conservation) in ~17 ms.
+- **Higher-fidelity simulator**: alpha-beta collective cost; EP-aware MoE memory;
+  per-op trace + per-stream occupancy telemetry.
+
+What remains (M2–M6 device paths, P1–P3) is **gated on real hardware** — a CUDA
+toolchain and ultimately a GB300 cluster — and is marked 🔒 below.
 
 ---
 
@@ -25,47 +37,50 @@ The planning + simulation layer that lives in this repo.
 **Runnable today:** compile + validate all 220,032 ranks and replay the schedule to
 estimate performance — with no GPU.
 
-### M1 — Reference & spec freeze ⬜
-*Deliverables:* a golden JAX/PyTorch reference for a small model; frozen model /
-optimizer / precision / dataset format; correctness tolerances; a baseline profile
-to compare against later.
-*Exit:* small model reproduces loss/grad/optimizer-update; the hot path cai must
-replace is enumerated; the speedup hypothesis is decomposed per op.
+### M1 — Reference & spec freeze ✅
+*Done:* `src/refmodel.{c,h}` is the golden reference (fp64, real fwd/bwd/AdamW),
+backward verified against central finite differences; `tools/reftrain.c` trains it on
+CPU. This is the correctness oracle the device path must match.
 
-### M2 — Single-GPU C trainer (real compute) ⬜
-Fill in `src/backend_cuda.c` (`cai_backend_cuda_create`): device bring-up, modules,
-precompiled cubins launched via the Driver API, real forward/backward/optimizer.
-*Exit:* 1 GPU matches the M1 reference loss; **zero runtime allocation**; the steady
-step runs as a CUDA Graph; per-op timeline captured. → unlocks **P1**.
+### M2 — Single-GPU C trainer (real compute)  CPU ✅ · device 🔒
+*CPU realization (done):* `reftrain` runs a real forward/backward/AdamW loop on CPU
+and learns (loss 4.16→0.003, 100% held-out acc) — the training algorithm is proven.
+*Device (needs GPU):* fill in `src/backend_cuda.c` (`cai_backend_cuda_create`):
+device bring-up, cubins via the Driver API, CUDA-Graph steady step matching the
+reference loss with zero runtime allocation. → unlocks **P1**.
 
-### M3 — Intra-rack (tray → 72 GPU) ⬜
+### M3 — Intra-rack (tray → 72 GPU) 🔒
 Build NCCL communicators from the plan's comm groups; TP/DP groups; NVLink-local
 collectives; rack-local checkpoint shards.
 *Exit:* identical loss curve at 4 / 8 / 72 GPU; TP beats the baseline intra-rack;
 collective shape mismatches are caught **before** launch; long single-rack run.
 
-### M4 — Multi-rack pipeline ⬜
+### M4 — Multi-rack pipeline 🔒
 Real `PIPE_SEND/RECV`, 1F1B executed across racks, comm/compute overlap, NIC
 utilization telemetry, pod-level checkpoint restore, failure injection.
 *Exit:* measured pipeline bubble within the model's prediction; stage imbalance is
 detectable; restore from checkpoint at pod granularity.
 
-### M5 — Pod scale ⬜
+### M5 — Pod scale 🔒
 Hierarchical launcher + control plane, DP reduce-scatter/all-gather at scale, MoE
 all-to-all, spare-rank recovery, straggler detection.
 *Exit:* per-pod goodput beats the baseline; auto-recovery after injected failure;
 checkpoint pause does not dominate the step; stragglers isolated. → unlocks **P2**.
 
-### M6 — Full 220k-class ⬜
-Global plan compilation at full scale (already works in simulation), hierarchical
-job launch, global checkpoint manifest + telemetry, rack/pod failure policy.
-*Exit:* full-topology plan generation completes; pre-launch validation rules out
-collective deadlock; all ranks agree on `plan_hash` / `topology_hash`; smoke step →
-sustained-goodput run; JAX comparison report.
+### M6 — Full 220k-class  validation ✅ · run 🔒
+*Done (no GPU):* full-topology plan generation; **pre-launch validation** via
+`plan_verify` rules out collective deadlock — communicator tiling, `plan_hash` /
+`topology_hash` agreement, intra-stage op identity, and pipeline p2p conservation,
+checked across all 220,032 ranks.
+*Needs GPU:* hierarchical job launch, global checkpoint manifest, rack/pod failure
+policy, smoke step → sustained-goodput run, JAX comparison report.
 
 ---
 
 ## Performance tiers
+
+All performance tiers are 🔒 (need real GPUs to measure); the simulator already
+*predicts* where the wins are (e.g. comm_dp dominates at 1719-way FSDP over NICs).
 
 | tier | unlocked by | levers | target |
 |---|---|---|---|
@@ -80,25 +95,30 @@ generality and fully specializing to the physical layout of 220k GB300s.
 
 ## Cross-cutting tracks (run throughout)
 
-- **Kernels** ⬜ — handwritten RMSNorm / RoPE / SwiGLU / fused attention fwd+bwd /
+- **Telemetry** ✅ (no-GPU parts) — per-op trace (CSV) + per-stream occupancy from
+  `trainer`; `cai_trace_*` API. Pod aggregation / NIC / NVLink counters come with M4–M5.
+- **Simulator fidelity** ✅ (this pass) — alpha-beta collective cost (latency ~log2(size)
+  + ring bandwidth) and EP-aware MoE memory. Still to do: rails/congestion, and
+  **validating against measured M2/M3 numbers** once a GPU is available.
+- **Kernels** 🔒 — handwritten RMSNorm / RoPE / SwiGLU / fused attention fwd+bwd /
   AdamW / MoE dispatch+combine; start on cuBLASLt + cuDNN, replace hot paths as the
-  profile dictates.
-- **Communication** ⬜ — NCCL for bulk collectives → NVSHMEM for fine-grained
+  profile dictates. (The fp64 `refmodel` is the per-kernel correctness oracle.)
+- **Communication** 🔒 — NCCL for bulk collectives → NVSHMEM for fine-grained
   pipeline / expert routing → cluster-specific custom collectives.
-- **Fault tolerance** ⬜ — async checkpoint, two-phase commit, rank-local NVMe →
-  remote, spare-rank substitution; elastic training later (not V1).
-- **Telemetry** ⬜ — per-rank GPU-event ring buffer, pod aggregation, end-to-end
-  goodput / MFU / NIC / NVLink dashboards (compile-time excluded, checkpoint &
-  data-loader stalls included).
-- **Simulator fidelity** 🚧 — tighten the analytic cost model (rails, congestion,
-  EP storage sharding) and **validate it against measured M2/M3 numbers** so the
-  planner stays predictive as scale grows.
+- **Fault tolerance** 🚧 — checkpoint save/restore + rolling "latest" pointer +
+  topology-hash guard exist; async / two-phase commit / spare-rank substitution
+  need the device runtime.
 
 ---
 
 ## Next three steps
 
-1. **M1**: stand up the small-model golden reference and freeze the spec.
-2. **M2**: implement `backend_cuda.c` device bring-up and match reference loss on 1 GPU.
-3. **Close the loop**: feed M2's measured op times back into the simulator's cost
-   model and check the M0 estimates against reality.
+The next milestones all require a CUDA toolchain / GPU (not available in this
+environment), so they are the first things to do once hardware is in hand:
+
+1. **M2 device**: implement `backend_cuda.c` bring-up; match the fp64 `refmodel`
+   loss on one GPU with zero runtime allocation and a CUDA-Graph steady step.
+2. **M3**: wire NCCL communicators from the (already-verified) comm groups; confirm
+   an identical loss curve at 4 / 8 / 72 GPU.
+3. **Close the loop**: feed measured op times into the simulator's cost model and
+   check the predictions in this build against reality.

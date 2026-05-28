@@ -16,6 +16,9 @@ struct cai_context {
     cai_step_stats_t last;
     double stream_time[CAI_STREAM_COUNT];
     double *event_time; /* [plan.hdr.num_events] */
+    int trace_on;
+    cai_trace_rec_t *trace; /* [plan.hdr.num_ops] when tracing */
+    uint32_t trace_n;
 };
 
 static const cai_comm_group_t *find_group(const cai_plan_t *p, uint32_t id) {
@@ -130,6 +133,10 @@ int cai_train_step(cai_context_t *ctx, const cai_batch_t *batch) {
 
     for (int s = 0; s < CAI_STREAM_COUNT; s++) ctx->stream_time[s] = 0.0;
     for (uint32_t e = 0; e < p->hdr.num_events; e++) ctx->event_time[e] = 0.0;
+    ctx->trace_n = 0;
+    if (ctx->trace_on && !ctx->trace)
+        ctx->trace = malloc((size_t)p->hdr.num_ops * sizeof(cai_trace_rec_t));
+    double work[CAI_STREAM_COUNT] = {0}; /* actual busy time per stream */
 
     /* Single forward pass over the program: each stream advances in issue order;
      * record/wait events couple streams. The compiler guarantees a DAG (every
@@ -157,7 +164,20 @@ int cai_train_step(cai_context_t *ctx, const cai_batch_t *batch) {
             g = find_group(p, op->aux0);
             if (!g) return CAI_ERR_PLAN;
         }
-        ctx->stream_time[st] += ctx->be->op_seconds(ctx->be, op, g);
+        double dur = ctx->be->op_seconds(ctx->be, op, g);
+        double start = ctx->stream_time[st];
+        ctx->stream_time[st] = start + dur;
+        work[st] += dur;
+        if (ctx->trace_on && ctx->trace) {
+            cai_trace_rec_t *r = &ctx->trace[ctx->trace_n++];
+            r->op_index = i;
+            r->kind = op->kind;
+            r->stream = st;
+            r->start_s = start;
+            r->end_s = start + dur;
+            r->bytes = op->bytes;
+            r->flops = op->flops;
+        }
     }
 
     double busy = 0.0, busy_compute = 0.0;
@@ -184,8 +204,34 @@ int cai_train_step(cai_context_t *ctx, const cai_batch_t *batch) {
     L->tokens_per_s = step_time > 0 ? (double)p->hdr.global_tokens_per_step / step_time : 0.0;
     L->tokens_per_s_per_gpu = L->tokens_per_s / (double)p->hdr.world_size;
     L->arena_bytes = p->hdr.arena_bytes;
+    for (int s = 0; s < CAI_STREAM_COUNT; s++) L->stream_busy[s] = work[s];
 
     ctx->step++;
+    return CAI_OK;
+}
+
+int cai_trace_enable(cai_context_t *ctx, int on) {
+    ctx->trace_on = on ? 1 : 0;
+    if (!on) {
+        free(ctx->trace);
+        ctx->trace = NULL;
+    }
+    return CAI_OK;
+}
+
+int cai_trace_dump_csv(cai_context_t *ctx, const char *path) {
+    if (!ctx->trace || ctx->trace_n == 0) return CAI_ERR_INVALID;
+    FILE *f = fopen(path, "w");
+    if (!f) return CAI_ERR_IO;
+    fprintf(f, "op_index,kind,stream,start_us,end_us,dur_us,bytes,flops\n");
+    for (uint32_t i = 0; i < ctx->trace_n; i++) {
+        cai_trace_rec_t *r = &ctx->trace[i];
+        fprintf(f, "%u,%s,%s,%.4f,%.4f,%.4f,%llu,%llu\n", r->op_index,
+                cai_op_name(r->kind), cai_stream_name(r->stream), r->start_s * 1e6,
+                r->end_s * 1e6, (r->end_s - r->start_s) * 1e6,
+                (unsigned long long)r->bytes, (unsigned long long)r->flops);
+    }
+    fclose(f);
     return CAI_OK;
 }
 
@@ -225,6 +271,7 @@ int cai_finalize(cai_context_t *ctx) {
     if (ctx->be && ctx->be->destroy) ctx->be->destroy(ctx->be);
     cai_plan_free(&ctx->plan);
     free(ctx->event_time);
+    free(ctx->trace);
     free(ctx);
     return CAI_OK;
 }
