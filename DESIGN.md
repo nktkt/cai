@@ -1,36 +1,45 @@
-# cai — 220k GB300 専用 C トレーニングスタック (設計 / V1.0)
+# cai — a 220k GB300 specialized C training stack (Design / V1.0)
 
-## 0. このリポジトリの位置づけ
+## 0. What this repository is
 
-「Cで書いた、220,000 GPU 専用の AI トレーニングスタック」という構想を、**実際にビルド・実行・検証できる形**で起こしたもの。
+This takes the idea of "a 220,000-GPU-specialized AI training stack written in C"
+and turns it into something you can **actually build, run, and verify**.
 
-ただし本物の学習(GEMM/collective/kernel を GPU で回す)は、ここには 22 万 GPU が無いので **実行できない**。
-そこでこの V1.0 では、設計が「最重要」と位置づける部分 ——
+That said, real training (running GEMM/collectives/kernels on GPUs) **cannot run
+here**, because there are no 220k GPUs available. So V1.0 implements the parts the
+design considers "most important" ——
 
-- offline plan compiler（並列化分解・メモリ配置・通信グループ・パイプラインスケジュールの事前生成）
-- topology mapping（rank ↔ rack/tray/gpu）
-- static schedule（1F1B の発行順）
-- static memory arena（実行時 malloc ゼロ前提のレイアウト）
-- op-table runtime（イベント駆動でスケジュールを再生し、step time / bubble / MFU / tokens/s を算出）
+- offline plan compiler (pre-generating the parallelism decomposition, memory
+  layout, communication groups, and pipeline schedule)
+- topology mapping (rank ↔ rack/tray/gpu)
+- static schedule (1F1B issue order)
+- static memory arena (a layout premised on zero runtime malloc)
+- op-table runtime (event-driven replay of the schedule, computing step time /
+  bubble / MFU / tokens/s)
 
-—— を **GPU 非依存の本物の C コード**として完成させている。GPU が要る所(GEMM/cuDNN/NCCL/NVSHMEM/CUDA Graphs/cubin)は `#ifdef CAI_WITH_CUDA` の背後に隔離し、CPU 解析バックエンドで全体が動く。
+—— as **real, GPU-independent C code**. The parts that need a GPU (GEMM / cuDNN /
+NCCL / NVSHMEM / CUDA Graphs / cubin) are isolated behind `#ifdef CAI_WITH_CUDA`,
+and the whole thing runs on a CPU analytic backend.
 
-つまり: **「学習は回せないが、220,032 rank の plan を生成・検証し、runtime でスケジュールを流して性能特性を見積もる」**ところまでは実物として動く。
+In other words: **"training can't run, but generating and validating plans for all
+220,032 ranks, and streaming the schedule through the runtime to estimate
+performance characteristics, works for real."**
 
-## 1. 目標 / 非目標
+## 1. Goals / non-goals
 
-作るもの (V1.0):
-- 固定モデル・固定 shape・固定 precision・固定 topology・固定並列構成 専用の **静的分散トレーニング実行系**
+What we build (V1.0):
+- a **static, distributed training executor** specialized for a fixed model, fixed
+  shapes, fixed precision, fixed topology, and fixed parallelism config
 - runtime / scheduler / memory planner / comm coordinator / checkpoint / telemetry
 
-作らないもの (V1.0):
-- 自動微分・動的 shape・Python runtime・汎用 operator dispatcher
-- 実行時の malloc/free・実行時グラフコンパイル
-- 「C 版 JAX」になること（汎用性は捨てる、が勝ち筋）
+What we do **not** build (V1.0):
+- autodiff, dynamic shapes, a Python runtime, a generic operator dispatcher
+- runtime malloc/free, runtime graph compilation
+- becoming "C-flavored JAX" (throwing away generality *is* the winning move)
 
-## 2. アーキテクチャ
+## 2. Architecture
 
-判断は全部オフライン、runtime はそれを replay するだけ。
+All decisions happen offline; the runtime merely replays them.
 
 ```
                  model + parallelism + topology (config)
@@ -56,29 +65,33 @@
                     +-------------------------+
 ```
 
-runtime は「考えない」: op を stream 毎に発行順で進め、record/wait イベントで stream 間を同期するだけ。
+The runtime "doesn't think": it advances each stream's ops in issue order and
+synchronizes streams via record/wait events. That's all.
 
-## 3. バイナリ形式
+## 3. Binary formats
 
-すべて固定レイアウトの POD で、`_Static_assert` でサイズを固定（同一クラスタ=同一エンディアン前提）。
+Everything is fixed-layout POD with sizes pinned by `_Static_assert` (assuming a
+homogeneous cluster = same endianness).
 
-- `topology.bin` : magic `CTOP` + `cai_topology_t`(64B)
-- `plan.rankNNNNNN.bin` : `cai_plan_header_t`(128B) + tensor table + comm groups + op table
-  - header に `plan_hash` / `topology_hash` を埋め込み、runtime は**異なる topology 用に compile された plan を拒否**する（22 万 GPU での事故防止）。
+- `topology.bin` : magic `CTOP` + `cai_topology_t` (64B)
+- `plan.rankNNNNNN.bin` : `cai_plan_header_t` (128B) + tensor table + comm groups + op table
+  - the header embeds `plan_hash` / `topology_hash`, so the runtime **refuses a plan
+    that was compiled for a different topology** (accident prevention at 220k scale).
 
-主要構造体:
-| 構造体 | サイズ | 役割 |
+Key structs:
+| struct | size | role |
 |---|---|---|
-| `cai_phys_id_t` | 12B | rank の物理位置 (rack/tray/gpu/nic/rail) |
-| `cai_topology_t` | 64B | クラスタ記述 (帯域/FLOPS/メモリ含む) |
-| `cai_op_t` | 32B | 1 命令 (flops or bytes, stream, event/group) |
-| `cai_comm_group_t` | 16B | communicator (kind/color/size、ranks は導出) |
-| `cai_tensor_desc_t` | 24B | arena 内テンソル (class/offset/bytes) |
-| `cai_plan_header_t` | 128B | plan メタ + hash + 派生量 |
+| `cai_phys_id_t` | 12B | physical location of a rank (rack/tray/gpu/nic/rail) |
+| `cai_topology_t` | 64B | cluster description (incl. bandwidth/FLOPS/memory) |
+| `cai_op_t` | 32B | one instruction (flops or bytes, stream, event/group) |
+| `cai_comm_group_t` | 16B | communicator (kind/color/size; ranks are derived) |
+| `cai_tensor_desc_t` | 24B | a tensor in the arena (class/offset/bytes) |
+| `cai_plan_header_t` | 128B | plan metadata + hashes + derived quantities |
 
-## 4. rank マッピングと並列化
+## 4. Rank mapping and parallelism
 
-GB300 NVL72 = 1 rack 72 GPU = 1 NVLink ドメイン。rank 座標は **TP を最内**に置く:
+GB300 NVL72 = one rack of 72 GPUs = one NVLink domain. The rank coordinate puts
+**TP innermost**:
 
 ```
 tp_id = rank % tp
@@ -87,39 +100,52 @@ pp_id = (rank / (tp*cp)) % pp      <- pipeline stage
 dp_id =  rank / (tp*cp*pp)
 ```
 
-これで TP グループが連続 rank=同一 rack に収まり、NVLink 内で閉じる（linter が `TP <= gpus_per_rack` と割り切れを検査）。
-- ラック内: Tensor / Sequence / 小規模 Expert parallel
-- ラック間: Pipeline activation / DP reduce-scatter / MoE all-to-all
+This keeps a TP group on consecutive ranks = the same rack, closed inside NVLink
+(the linter checks `TP <= gpus_per_rack` and divisibility).
+- Inside a rack: tensor / sequence / small-scale expert parallel
+- Across racks: pipeline activations / DP reduce-scatter / MoE all-to-all
 
-`tp*pp*cp` が world を割り切らない場合は compiler がエラーにし、`spare_gpus` での調整を促す。
+If `tp*pp*cp` does not divide the world size, the compiler errors out and points you
+at `spare_gpus` to adjust.
 
-## 5. op-table とシミュレーションモデル
+## 5. The op-table and the simulation model
 
-compiler は各 stage の 1 step 分（全 microbatch の fwd+bwd + optimizer）を、1F1B 発行順で op に展開する（`tools` ではなく `src/model.c`）。
+The compiler expands one step per stage (all microbatches' fwd+bwd + optimizer)
+into ops in 1F1B issue order (in `src/model.c`, not `tools`).
 
-stream は 6 本: `compute_hi / compute_lo / comm_tp / comm_pp / comm_dp / io`。
-依存は **EVENT_RECORD / EVENT_WAIT** で表現:
-- TP all-reduce は compute と直列（隠せない通信、現実的）
-- DP weight all-gather (FSDP) は次レイヤ計算と**オーバーラップ**するよう発行
-- DP grad reduce-scatter は backward 計算と**オーバーラップ**、optimizer 直前にバリア
+There are 6 streams: `compute_hi / compute_lo / comm_tp / comm_pp / comm_dp / io`.
+Dependencies are expressed with **EVENT_RECORD / EVENT_WAIT**:
+- the TP all-reduce is serialized with compute (unhideable comm, realistic)
+- the DP weight all-gather (FSDP) is issued so it **overlaps** the next layer's compute
+- the DP grad reduce-scatter **overlaps** backward compute, with a barrier just
+  before the optimizer
 
-runtime のシミュレーション（`cai_train_step`）:
-1. op を発行順に 1 パス走査。stream 毎に時刻を進め、RECORD は event 時刻を記録、WAIT は `max()` で stream を待たせる（compiler が DAG を保証するので 1 パスで正しい）。
-2. `busy = max(stream 時刻)` … TP/DP 通信が計算に隠れたかが自然に出る。
-3. パイプライン fill/drain は単一 rank では見えないので解析式で補正:
-   `step_time = busy / (1 - bubble)`, `bubble = (pp-1)/(m+pp-1)`。
-4. `MFU = (useful 6N flops/GPU) / (peak FLOPS * step_time)`、tokens/s なども算出。
+The runtime simulation (`cai_train_step`):
+1. Walk the ops once in issue order. Advance each stream's clock; RECORD stamps the
+   event's time, WAIT stalls the stream via `max()` (the compiler guarantees a DAG,
+   so one pass is correct).
+2. `busy = max(stream clocks)` — whether TP/DP comm was hidden under compute falls
+   out naturally.
+3. Pipeline fill/drain isn't visible from a single rank, so it's corrected
+   analytically:
+   `step_time = busy / (1 - bubble)`, `bubble = (pp-1)/(m+pp-1)`.
+4. Compute `MFU = (useful 6N flops/GPU) / (peak FLOPS * step_time)`, tokens/s, etc.
 
-op の所要時間は backend が返す（CPU: `flops/peak` と `bytes/帯域`、collective は ring 係数 + intra/inter-rack 帯域）。CUDA backend は同じ関数を「実 launch + 実測」に差し替える設計。
+An op's duration comes from the backend (CPU: `flops/peak` and `bytes/bandwidth`,
+collectives use a ring factor + intra/inter-rack bandwidth). The CUDA backend is
+designed to swap the same function for "real launch + measured time."
 
-## 6. メモリ arena
+## 6. The memory arena
 
-実行時 malloc 禁止。クラス別セグメント（param/grad/optstate/activation/comm/workspace）を連続配置し、テンソルは class 内オフセット→arena 全体オフセットへ rebase（`src/arena.c`）。
-per-GPU メモリ見積りは FSDP/ZeRO-3 シャーディング前提で算出し、`budget`(=HBM 容量 or 上書き値) と突き合わせて OK/OVER を報告。
+No runtime malloc. Per-class segments (param/grad/optstate/activation/comm/workspace)
+are laid out contiguously, and tensors are rebased from a class-local offset to a
+whole-arena offset (`src/arena.c`).
+The per-GPU memory estimate assumes FSDP/ZeRO-3 sharding and is checked against the
+`budget` (= HBM capacity or an override), reporting OK / OVER.
 
-## 7. ファイル対応表
+## 7. File map
 
-| 設計概念 | 実体 |
+| design concept | implementation |
 |---|---|
 | offline plan compiler | `tools/plan_compiler.c` + `src/model.c` |
 | topology linter | `tools/topology_linter.c` |
@@ -127,36 +153,48 @@ per-GPU メモリ見積りは FSDP/ZeRO-3 シャーディング前提で算出�
 | rank/topology mapping | `src/topology.c` |
 | static memory arena | `src/arena.c` |
 | 1F1B schedule + bubble | `src/pipeline.c` |
-| op-table / sizing / 並列分解 | `src/model.c` |
+| op-table / sizing / decomposition | `src/model.c` |
 | plan (de)serialize | `src/plan_io.c` |
-| backend 抽象 | `src/backend.h` |
-| CPU 解析 backend | `src/backend_cpu.c` |
+| backend abstraction | `src/backend.h` |
+| CPU analytic backend | `src/backend_cpu.c` |
 | CUDA backend (stub) | `src/backend_cuda.c` |
 | io / hash / log / fmt | `src/common.c` |
 
-## 8. V1.0 の近似と TODO
+## 8. V1.0 approximations and TODO
 
-意図的な単純化（数値は妥当な桁になるが厳密ではない）:
-- collective は ring 係数 + 単一リンク帯域の概算（rail/輻輳は未モデル）
-- MoE の expert ストレージ分散は EP を厳密に分けず dp シャードに丸め（all-to-all と active param は反映）
-- activation/通信バッファ係数は代表値（recompute 有無で切替）
+Intentional simplifications (the numbers land in the right order of magnitude, but
+aren't exact):
+- collectives use a ring factor + single-link bandwidth approximation (rails and
+  congestion are not modeled)
+- MoE expert storage sharding isn't split out by EP precisely; it's folded into the
+  DP shard (all-to-all and active-param counts are still reflected)
+- activation/comm buffer factors are representative values (switched by whether
+  recompute is on)
 
-CUDA 実装で埋める順（`backend_cuda.c`）:
-1. Driver API で precompiled cubin を `cuLaunchKernel`、stream/event を実体化
-2. comm groups から NCCL communicator を構築、collective を実 launch
-3. NVSHMEM で pipeline / MoE の細粒度通信、CUDA Graphs で steady step を焼く
-4. `op_seconds` を実測 (CUDA events) に差し替え → 同じ runtime がそのまま本番に
+Order in which to fill in the CUDA implementation (`backend_cuda.c`):
+1. Launch precompiled cubins via the Driver API (`cuLaunchKernel`); realize streams/events
+2. Build NCCL communicators from the comm groups; launch real collectives
+3. Use NVSHMEM for fine-grained pipeline / MoE communication, and CUDA Graphs to bake
+   the steady step
+4. Swap `op_seconds` for measured time (CUDA events) → the same runtime moves to
+   production as-is
 
-速度の現実的な狙い（「JAX 比 10x」の内訳）:
-- V1.0: static memory + CUDA Graph + topology-aware mapping + comm/compute overlap で **goodput 1.3–2.5x**
-- V1.5: custom kernel + pipeline 最適化で **3–5x**
-- V2 : megakernel + GPU-initiated scheduler + model/topology co-design で条件次第 **5x 超**
-- 10x は「C だから」ではなく、**汎用性を捨てて 220k GB300 の物理構成へ完全特化**したときの複合効果として狙う。
+Realistic speed targets (breaking down the "10x vs JAX" claim):
+- V1.0: static memory + CUDA Graphs + topology-aware mapping + comm/compute overlap →
+  **goodput 1.3–2.5x**
+- V1.5: custom kernels + pipeline optimization → **3–5x**
+- V2 : megakernels + a GPU-initiated scheduler + model/topology co-design →
+  **>5x under the right conditions**
+- 10x isn't "because it's C"; aim for it as the compound effect of **throwing away
+  generality and fully specializing to the physical layout of 220k GB300s**.
 
-## 9. 最大の失敗ポイント（自戒）
+## 9. The biggest failure modes (notes to self)
 
-1. 汎用フレームワーク化（→ JAX/PyTorch の劣化コピー）
-2. GEMM/NCCL を最初から自作（→ V1 が破綻）。まず NVIDIA stack を叩き、真の bottleneck だけ置換
-3. pipeline stage imbalance の軽視（最遅 stage が全体を支配）
-4. checkpoint の後回し（22 万 GPU で無故障前提は成立しない → V1 機能）
-5. 雑な JAX 比較（同一 model/tokens/precision/収束/故障条件で測る）
+1. Turning it into a general framework (→ a degraded copy of JAX/PyTorch)
+2. Writing your own GEMM/NCCL from day one (→ V1 collapses). Call the NVIDIA stack
+   first, replace only the true bottlenecks
+3. Underrating pipeline stage imbalance (the slowest stage dominates everything)
+4. Deferring checkpointing (a no-failure assumption doesn't hold at 220k GPUs → it's a
+   V1 feature)
+5. Sloppy JAX comparisons (measure under identical model/tokens/precision/convergence/
+   failure conditions)
