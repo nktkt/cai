@@ -10,7 +10,8 @@ NCCL, NVSHMEM, cubins) lives behind `#ifdef CAI_WITH_CUDA`. An analytic CPU
 backend stands in for it, so the whole pipeline — compile per-rank plans, validate
 them, and replay the schedule to estimate performance — runs on a laptop.
 
-See [DESIGN.md](DESIGN.md) for the full design.
+See [DESIGN.md](DESIGN.md) for the full design and [ROADMAP.md](ROADMAP.md) for the
+path from this scaffold to a real 220k trainer.
 
 > Status: V1.0 scaffold. The offline compiler, topology mapping, static schedule,
 > memory arena, and op-table runtime are real, tested C. The on-device CUDA
