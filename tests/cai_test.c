@@ -7,6 +7,7 @@
 #include "cai.h"
 #include "cai_common.h"
 #include "cai_model.h"
+#include "refmodel.h"
 
 static int g_fail;
 #define CHECK(cond, ...)                                       \
@@ -188,6 +189,34 @@ static void test_plan_roundtrip(void) {
     remove(path);
 }
 
+static void test_refmodel(void) {
+    printf("[refmodel]\n");
+    ref_spec_t s = {.vocab = 7, .seq = 4, .hidden = 8, .layers = 2,
+                    .n_heads = 2, .head_dim = 4, .ffn = 16, .eps = 1e-6};
+    ref_model_t *m = ref_model_create(&s, 12345);
+    int B = 2, BT = B * s.seq;
+    int tokens[8], targets[8];
+    for (int i = 0; i < BT; i++) {
+        tokens[i] = (i * 3 + 1) % s.vocab;
+        targets[i] = (i * 5 + 2) % s.vocab;
+    }
+    /* backward must match central finite differences (fp64 oracle) */
+    double rel = ref_grad_check(m, B, tokens, targets, 0, 1e-4);
+    CHECK(rel < 1e-4, "grad check max rel err = %.2e", rel);
+
+    /* training must actually reduce loss on a learnable (periodic) target */
+    for (int i = 0; i < BT; i++) targets[i] = tokens[i]; /* identity is learnable */
+    double l0 = ref_forward(m, B, tokens, targets);
+    for (int step = 0; step < 300; step++) {
+        ref_forward(m, B, tokens, targets);
+        ref_backward(m, B, tokens, targets);
+        ref_adamw(m, 0.02, 0.9, 0.999, 1e-8, 0.0);
+    }
+    double l1 = ref_forward(m, B, tokens, targets);
+    CHECK(l1 < l0 * 0.5, "loss should drop: %.4f -> %.4f", l0, l1);
+    ref_model_free(m);
+}
+
 int main(void) {
     cai_log_set_level(CAI_LOG_ERROR); /* quiet */
     test_topology();
@@ -195,6 +224,7 @@ int main(void) {
     test_pipeline();
     test_decompose();
     test_plan_roundtrip();
+    test_refmodel();
     if (g_fail == 0)
         printf("\nALL TESTS PASSED\n");
     else
