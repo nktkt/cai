@@ -74,6 +74,13 @@ static void test_pipeline(void) {
     double b = cai_pipeline_bubble(16, 128);
     CHECK(b > 0.10 && b < 0.11, "pp=16 m=128 bubble=%.4f", b);
 
+    /* interleaving shrinks the bubble; vpp=1 is plain 1F1B */
+    double b1 = cai_pipeline_bubble_interleaved(16, 128, 1);
+    double b2 = cai_pipeline_bubble_interleaved(16, 128, 2);
+    double b4 = cai_pipeline_bubble_interleaved(16, 128, 4);
+    CHECK(b1 == cai_pipeline_bubble(16, 128), "vpp=1 equals plain 1F1B");
+    CHECK(b2 < b1 && b4 < b2, "interleave cuts bubble: %.4f > %.4f > %.4f", b1, b2, b4);
+
     uint32_t pp = 4, m = 8;
     cai_tick_t buf[64];
     for (uint32_t stage = 0; stage < pp; stage++) {
@@ -136,6 +143,17 @@ static void test_decompose(void) {
     cai_decomp_t d2;
     CHECK(cai_decompose(&cfg, &d2, err, sizeof(err)) == CAI_ERR_INVALID,
           "expected indivisible rejection");
+
+    /* vpp must divide layers across stages */
+    make_small(&cfg); /* num_layers=24, pp=3 */
+    cai_topology_finalize(&cfg.topo, err, sizeof(err));
+    cfg.model.vpp = 5; /* 24 % (3*5) != 0 */
+    cai_decomp_t d3;
+    CHECK(cai_decompose(&cfg, &d3, err, sizeof(err)) == CAI_ERR_INVALID,
+          "expected vpp divisibility rejection");
+    cfg.model.vpp = 2; /* 24 % (3*2) == 0 */
+    CHECK(cai_decompose(&cfg, &d3, err, sizeof(err)) == CAI_OK, "vpp=2 ok: %s", err);
+    CHECK(d3.bubble_ratio < cai_pipeline_bubble(3, 12), "vpp=2 lowers bubble");
 }
 
 static void test_plan_roundtrip(void) {

@@ -188,7 +188,9 @@ int cai_train_step(cai_context_t *ctx, const cai_batch_t *batch) {
     if (ctx->stream_time[CAI_STREAM_COMPUTE_LO] > busy_compute)
         busy_compute = ctx->stream_time[CAI_STREAM_COMPUTE_LO];
 
-    double bubble = cai_pipeline_bubble(p->hdr.num_stages, p->hdr.num_microbatches);
+    double bubble = cai_pipeline_bubble_interleaved(p->hdr.num_stages,
+                                                    p->hdr.num_microbatches,
+                                                    p->hdr.vpp ? p->hdr.vpp : 1);
     double step_time = (bubble < 1.0) ? busy / (1.0 - bubble) : busy;
 
     double useful_per_gpu = (double)p->hdr.global_tokens_per_step *

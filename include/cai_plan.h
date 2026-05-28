@@ -126,7 +126,8 @@ typedef struct {
 
     uint64_t global_tokens_per_step;
     uint64_t flops_per_token_useful; /* 6N-style, excludes recompute; for MFU */
-    uint64_t reserved;
+    uint32_t vpp;                    /* interleave / virtual-pipeline factor (>=1) */
+    uint32_t reserved;
 } cai_plan_header_t;
 
 _Static_assert(sizeof(cai_plan_header_t) == 128, "cai_plan_header_t layout");

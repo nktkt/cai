@@ -5,6 +5,13 @@ double cai_pipeline_bubble(uint32_t pp, uint32_t m) {
     return (double)(pp - 1) / (double)(m + pp - 1);
 }
 
+double cai_pipeline_bubble_interleaved(uint32_t pp, uint32_t m, uint32_t vpp) {
+    if (pp <= 1 || m == 0) return 0.0;
+    if (vpp < 1) vpp = 1;
+    /* with vpp chunks per device the fill/drain is amortized over vpp*m flows */
+    return (double)(pp - 1) / (double)((uint64_t)vpp * m + pp - 1);
+}
+
 uint32_t cai_pipeline_schedule_1f1b(uint32_t stage, uint32_t pp, uint32_t m,
                                     cai_tick_t *buf) {
     uint32_t n = 0;

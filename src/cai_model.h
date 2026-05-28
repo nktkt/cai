@@ -37,8 +37,9 @@ typedef struct {
     /* parallelism (fixed) */
     uint32_t tp;
     uint32_t pp;
-    uint32_t ep; /* expert parallel (MoE); 1 if dense */
-    uint32_t cp; /* context parallel; 1 if unused */
+    uint32_t ep;  /* expert parallel (MoE); 1 if dense */
+    uint32_t cp;  /* context parallel; 1 if unused */
+    uint32_t vpp; /* interleave / virtual pipeline stages per device; 1 = plain 1F1B */
     uint32_t microbatch;
     uint32_t grad_accum;
 
@@ -55,7 +56,7 @@ int cai_config_load(const char *path, cai_config_t *cfg, char *err, size_t errle
 
 /* Derived, cluster-wide quantities. Pure function of (model, finalized topo). */
 typedef struct {
-    uint32_t tp, pp, ep, cp, dp;
+    uint32_t tp, pp, ep, cp, dp, vpp;
     uint32_t model_replica_gpus; /* tp*pp*cp */
     uint64_t global_batch;       /* sequences per optimizer step */
     uint64_t global_tokens;      /* tokens per optimizer step */
@@ -116,5 +117,9 @@ uint32_t cai_pipeline_schedule_1f1b(uint32_t stage, uint32_t pp, uint32_t m,
 
 /* Fraction of the step a stage spends idle from pipeline fill/drain. */
 double cai_pipeline_bubble(uint32_t pp, uint32_t m);
+
+/* Interleaved (virtual-pipeline) 1F1B: vpp model chunks per device shrink the
+ * bubble by ~vpx. vpp==1 reduces to plain 1F1B. */
+double cai_pipeline_bubble_interleaved(uint32_t pp, uint32_t m, uint32_t vpp);
 
 #endif /* CAI_MODEL_H */

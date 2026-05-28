@@ -42,6 +42,7 @@ void cai_config_defaults(cai_config_t *cfg) {
     m->pp = 8;
     m->ep = 1;
     m->cp = 1;
+    m->vpp = 1;
     m->microbatch = 1;
     m->grad_accum = 32;
     m->mem_budget = 0;
@@ -81,6 +82,7 @@ static int set_kv(cai_config_t *cfg, const char *k, const char *v) {
     else if (!strcmp(k, "pp")) m->pp = (uint32_t)u;
     else if (!strcmp(k, "ep")) m->ep = (uint32_t)u;
     else if (!strcmp(k, "cp")) m->cp = (uint32_t)u;
+    else if (!strcmp(k, "vpp")) m->vpp = (uint32_t)u;
     else if (!strcmp(k, "microbatch")) m->microbatch = (uint32_t)u;
     else if (!strcmp(k, "grad_accum")) m->grad_accum = (uint32_t)u;
     else if (!strcmp(k, "mem_budget")) m->mem_budget = u;
@@ -203,18 +205,27 @@ int cai_decompose(const cai_config_t *cfg, cai_decomp_t *out, char *err,
         return CAI_ERR_INVALID;
     }
 
+    uint32_t vpp = m->vpp ? m->vpp : 1;
+    if (vpp > 1 && (m->num_layers % (m->pp * vpp)) != 0) {
+        snprintf(err, errlen,
+                 "interleave vpp=%u requires num_layers(%u) divisible by pp*vpp=%u",
+                 vpp, m->num_layers, m->pp * vpp);
+        return CAI_ERR_INVALID;
+    }
+
     memset(out, 0, sizeof(*out));
     out->tp = m->tp;
     out->pp = m->pp;
     out->cp = m->cp;
     out->ep = ep;
     out->dp = dp;
+    out->vpp = vpp;
     out->model_replica_gpus = (uint32_t)replica;
     out->num_microbatches = m->grad_accum;
     out->layers_per_stage = (m->num_layers + m->pp - 1) / m->pp;
     out->global_batch = (uint64_t)m->microbatch * m->grad_accum * dp;
     out->global_tokens = out->global_batch * m->seq_len;
-    out->bubble_ratio = cai_pipeline_bubble(m->pp, m->grad_accum);
+    out->bubble_ratio = cai_pipeline_bubble_interleaved(m->pp, m->grad_accum, vpp);
 
     /* parameters */
     uint64_t lt = layer_params_total(m);
@@ -311,8 +322,9 @@ int cai_report_decomp(FILE *f, const cai_config_t *cfg, const cai_decomp_t *d) {
     fprintf(f, "params     : total=%s  active/token=%s\n",
             cai_fmt_count((double)d->total_params, b0, sizeof(b0)),
             cai_fmt_count((double)d->active_params, b1, sizeof(b1)));
-    fprintf(f, "pipeline   : stages=%u microbatches=%u bubble=%.1f%% layers/stage~%u\n",
-            d->pp, d->num_microbatches, d->bubble_ratio * 100.0, d->layers_per_stage);
+    fprintf(f, "pipeline   : stages=%u vpp=%u microbatches=%u bubble=%.1f%% layers/stage~%u\n",
+            d->pp, d->vpp, d->num_microbatches, d->bubble_ratio * 100.0,
+            d->layers_per_stage);
     fprintf(f, "compute    : useful=%s FLOP/token  step=%s FLOP (cluster)\n",
             cai_fmt_count(d->flops_per_token_train / (cfg->model.recompute ? 4.0 : 3.0) * 3.0,
                           b0, sizeof(b0)),
@@ -617,6 +629,7 @@ int cai_build_plan(const cai_config_t *cfg, const cai_decomp_t *dec, uint32_t ra
     h->seq_len = m->seq_len;
     h->hidden_size = m->hidden_size;
     h->layers_in_stage = layers;
+    h->vpp = dec->vpp ? dec->vpp : 1;
     h->global_tokens_per_step = dec->global_tokens;
     {
         double hd = (double)m->num_heads * m->head_dim;
