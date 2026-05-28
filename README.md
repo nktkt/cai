@@ -45,13 +45,18 @@ refuses a plan that was compiled for a different cluster.
 ## Build & run
 
 ```sh
-make            # libcai.a + tools + tests
-make test       # unit tests (topology / arena / pipeline / plan / decompose)
-make demo       # lint -> compile 220k plans -> replay, end to end
-make CUDA=1     # also build the (stubbed) CUDA backend path
+make            # libcai.a + tools + tests   (GPU-free; only needs C11 + make)
+make test       # unit tests (topology / arena / pipeline / plan / refmodel / …)
+make demo       # lint -> verify -> compile 220k plans -> replay -> CPU train
+
+# real-GPU path (code-complete but UNVERIFIED; needs a CUDA toolchain + GPUs):
+make CUDA=1            # single-GPU executor (src/cuda/*.cu, tools/gpu_trainer.c)
+make CUDA=1 NCCL=1     # multi-GPU (DP/TP via NCCL); add NVSHMEM=1 for the P3 path
 ```
 
-Requires only a C11 compiler and `make`.
+The default build needs only a C11 compiler and `make`. `make CUDA=1` requires
+`nvcc`; the `src/cuda/*.cu` sources were written but not compiled or run in this
+repo's authoring environment — see [ROADMAP.md](ROADMAP.md).
 
 ## Tools
 
@@ -109,7 +114,10 @@ dtype names: `fp32 bf16 fp16 fp8e4m3 fp8e5m2 int32 uint8`
 include/   public headers (cai.h, cai_plan.h, cai_topology.h, cai_tensor.h)
 src/       library: topology, arena, model/op-table, pipeline, plan_io,
            runtime, backend_cpu, backend_cuda (stub), refmodel, common
-tools/     plan_compiler, topology_linter, trainer, plan_verify, reftrain, plan_recover
+src/cuda/  UNVERIFIED GPU path: cai_kernels.cu, cai_gpu_train.cu, cai_nccl.cu,
+           cai_nvshmem.cu (built only with CUDA=1)
+tools/     plan_compiler, topology_linter, trainer, plan_verify, reftrain,
+           plan_recover, gpu_trainer (CUDA=1), launch.sh
 tests/     cai_test
 configs/   small / full220k / full220k_moe
 ```

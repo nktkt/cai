@@ -165,6 +165,9 @@ The per-GPU memory estimate assumes FSDP/ZeRO-3 sharding and is checked against 
 | spare-rank recovery planner | `tools/plan_recover.c` (`cai_spare_rank`) |
 | per-op trace + per-stream occupancy | `src/runtime.c` (`cai_trace_*`) |
 | interleaved 1F1B (virtual pipeline) | `vpp` in `src/pipeline.c` / `src/model.c` |
+| GPU kernels (UNVERIFIED) | `src/cuda/cai_kernels.cu` |
+| GPU executor / NCCL / NVSHMEM (UNVERIFIED) | `src/cuda/cai_gpu_train.cu`, `cai_nccl.cu`, `cai_nvshmem.cu` |
+| GPU driver + multi-rank launcher (UNVERIFIED) | `tools/gpu_trainer.c`, `tools/launch.sh` |
 
 ## 8. V1.0 approximations and TODO
 

@@ -7,7 +7,8 @@ Two axes run in parallel:
 - **Scale** (M0→M6): correctness from one GPU up to the full cluster.
 - **Performance** (P1→P3): the speedup tiers layered on top.
 
-Legend: ✅ done · 🚧 in progress · ⬜ planned · 🔒 needs real GPUs (can't run here)
+Legend: ✅ done & tested · ⚙ code-complete but UNVERIFIED (needs a CUDA toolchain +
+GPUs to compile/run; not built here) · 🚧 in progress · 🔒 needs the real cluster
 
 ## Status (this build)
 
@@ -23,8 +24,16 @@ Everything implementable without a GPU is done and tested:
 - **Spare-rank recovery**: `plan_recover` hot-swaps a failed rank onto a spare GPU in
   another rack, emitting the identical replacement plan.
 
-What remains (M2–M6 device paths, P1–P3) is **gated on real hardware** — a CUDA
-toolchain and ultimately a GB300 cluster — and is marked 🔒 below.
+The on-device path is now **code-complete but UNVERIFIED** (no nvcc/GPU here):
+- `src/cuda/cai_kernels.cu` — handwritten kernels (rmsnorm/attn/swiglu/AdamW/CE…)
+- `src/cuda/cai_gpu_train.cu` — fp32 GPU executor mirroring the verified reference
+- `src/cuda/cai_nccl.cu` — DP/TP communicators from the validated layout
+- `src/cuda/cai_nvshmem.cu` — fine-grained GPU-initiated path (P3)
+- `tools/gpu_trainer.c`, `tools/launch.sh`, `make CUDA=1` build path
+
+These compile only with a CUDA toolchain and run only on GPUs; they are marked ⚙.
+What still needs the **real cluster** to do at all (sustained runs, cross-rack
+scaling, measured speedups) is marked 🔒.
 
 ---
 
@@ -45,14 +54,19 @@ estimate performance — with no GPU.
 backward verified against central finite differences; `tools/reftrain.c` trains it on
 CPU. This is the correctness oracle the device path must match.
 
-### M2 — Single-GPU C trainer (real compute)  CPU ✅ · device 🔒
+### M2 — Single-GPU C trainer (real compute)  CPU ✅ · device ⚙
 *CPU realization (done):* `reftrain` runs a real forward/backward/AdamW loop on CPU
 and learns (loss 4.16→0.003, 100% held-out acc) — the training algorithm is proven.
-*Device (needs GPU):* fill in `src/backend_cuda.c` (`cai_backend_cuda_create`):
-device bring-up, cubins via the Driver API, CUDA-Graph steady step matching the
-reference loss with zero runtime allocation. → unlocks **P1**.
+*Device (code-complete, unverified):* `src/cuda/cai_gpu_train.cu` is a fp32 GPU port
+of the reference graph driven by `tools/gpu_trainer.c`. Bring-up test (on a GPU):
+its loss curve should track `reftrain`'s. Still TODO on-device: cuBLASLt/tensor-core
+GEMM (naive kernel for now) and CUDA-Graph capture → **P1**.
 
-### M3 — Intra-rack (tray → 72 GPU) 🔒
+### M3 — Intra-rack (tray → 72 GPU)  comm code ⚙ · run 🔒
+*Code-complete:* `src/cuda/cai_nccl.cu` builds DP + TP communicators from the
+validated rank layout; the executor calls DP grad all-reduce and TP activation
+all-reduce at the right points. *Needs GPUs:* confirm an identical loss curve at
+4 / 8 / 72 GPU; FSDP weight sharding and the full TP weight split are next.
 Build NCCL communicators from the plan's comm groups; TP/DP groups; NVLink-local
 collectives; rack-local checkpoint shards.
 *Exit:* identical loss curve at 4 / 8 / 72 GPU; TP beats the baseline intra-rack;
@@ -103,11 +117,11 @@ generality and fully specializing to the physical layout of 220k GB300s.
 - **Simulator fidelity** ✅ (this pass) — alpha-beta collective cost (latency ~log2(size)
   + ring bandwidth) and EP-aware MoE memory. Still to do: rails/congestion, and
   **validating against measured M2/M3 numbers** once a GPU is available.
-- **Kernels** 🔒 — handwritten RMSNorm / RoPE / SwiGLU / fused attention fwd+bwd /
-  AdamW / MoE dispatch+combine; start on cuBLASLt + cuDNN, replace hot paths as the
-  profile dictates. (The fp64 `refmodel` is the per-kernel correctness oracle.)
-- **Communication** 🔒 — NCCL for bulk collectives → NVSHMEM for fine-grained
-  pipeline / expert routing → cluster-specific custom collectives.
+- **Kernels** ⚙ — handwritten RMSNorm / SwiGLU / causal attention fwd+bwd / AdamW /
+  CE / embed written in `cai_kernels.cu` (correctness-first; fusion + flash-attn +
+  tensor cores next). The fp64 `refmodel` is the per-kernel correctness oracle.
+- **Communication** ⚙ — NCCL DP/TP collectives (`cai_nccl.cu`) and an NVSHMEM
+  fine-grained path (`cai_nvshmem.cu`) written; cluster-specific custom collectives next.
 - **Fault tolerance** 🚧 — checkpoint save/restore + rolling "latest" pointer +
   topology-hash guard + spare-rank recovery planning (`plan_recover`) exist; async /
   two-phase commit and live substitution need the device runtime.
@@ -116,12 +130,14 @@ generality and fully specializing to the physical layout of 220k GB300s.
 
 ## Next three steps
 
-The next milestones all require a CUDA toolchain / GPU (not available in this
-environment), so they are the first things to do once hardware is in hand:
+The device code is written; everything left needs a CUDA toolchain / GPUs (absent
+here) to compile, verify, and measure. Once hardware is in hand:
 
-1. **M2 device**: implement `backend_cuda.c` bring-up; match the fp64 `refmodel`
-   loss on one GPU with zero runtime allocation and a CUDA-Graph steady step.
-2. **M3**: wire NCCL communicators from the (already-verified) comm groups; confirm
-   an identical loss curve at 4 / 8 / 72 GPU.
-3. **Close the loop**: feed measured op times into the simulator's cost model and
-   check the predictions in this build against reality.
+1. **Compile + bring-up (M2)**: `make CUDA=1`, fix whatever the unverified
+   `src/cuda/*.cu` needs to build, then run `gpu_trainer` on one GPU and confirm its
+   loss curve tracks `reftrain` (the fp64 oracle).
+2. **Scale (M3)**: `make CUDA=1 NCCL=1`; launch with `tools/launch.sh`; confirm an
+   identical loss curve at 4 / 8 / 72 GPU; then add FSDP + the full TP weight split.
+3. **Close the loop (P1)**: swap naive GEMM for cuBLASLt, add CUDA-Graph capture,
+   feed measured op times into the simulator's cost model, and check this build's
+   predictions against reality.
