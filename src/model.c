@@ -233,12 +233,23 @@ int cai_decompose(const cai_config_t *cfg, cai_decomp_t *out, char *err,
     double useful = 3.0 * fwd;
     out->step_flops = out->flops_per_token_train * (double)out->global_tokens;
 
-    /* memory per GPU */
+    /* memory per GPU.
+     * Non-expert params (attention, embeddings, router, norms) are FSDP-sharded
+     * across tp*dp. Expert params are sharded across tp*ep only (and replicated
+     * across the remaining dp/ep), so for MoE they occupy far more per GPU than a
+     * naive tp*dp split would suggest. Dense reduces to tp*dp everywhere. */
     double pb = (double)cai_dtype_size(m->param_dtype);
     double ob = (double)cai_dtype_size(m->optim_dtype);
-    double shard = (double)m->tp * dp; /* FSDP/ZeRO-3 */
-    double stage_params = (double)out->total_params / m->pp;
-    double pcount = stage_params / shard;
+    uint64_t expert_per = m->is_moe ? (uint64_t)m->num_experts * mlp_one(m) : mlp_one(m);
+    uint64_t nonexpert_per = attn_params(m) + 2ull * m->hidden_size +
+                             (m->is_moe ? (uint64_t)m->hidden_size * m->num_experts : 0);
+    double total_expert = (double)m->num_layers * expert_per;
+    double total_nonexpert =
+        (double)m->num_layers * nonexpert_per + (double)embed + m->hidden_size;
+    double nonexpert_shard = (double)m->tp * dp;
+    double expert_shard = m->is_moe ? (double)m->tp * ep : (double)m->tp * dp;
+    double pcount = (total_nonexpert / m->pp) / nonexpert_shard +
+                    (total_expert / m->pp) / expert_shard;
     out->mem_param = (uint64_t)(pcount * pb);
     out->mem_grad = (uint64_t)(pcount * pb);
     out->mem_opt =

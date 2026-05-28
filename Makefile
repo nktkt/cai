@@ -3,7 +3,7 @@
 
 CC      ?= cc
 CFLAGS  ?= -std=c11 -O2 -g -Wall -Wextra
-CFLAGS  += -Iinclude -Isrc
+CFLAGS  += -Iinclude -Isrc -MMD -MP
 LDLIBS  += -lm
 
 ifeq ($(CUDA),1)
@@ -56,3 +56,5 @@ $(BUILD) $(BIN):
 
 clean:
 	rm -rf $(BUILD) $(BIN) out
+
+-include $(LIB_OBJ:.o=.d)

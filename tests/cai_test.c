@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "backend.h"
 #include "cai.h"
 #include "cai_common.h"
 #include "cai_model.h"
@@ -217,8 +218,72 @@ static void test_refmodel(void) {
     ref_model_free(m);
 }
 
+static void test_costmodel(void) {
+    printf("[costmodel]\n");
+    cai_topology_t t;
+    cai_topology_default(&t);
+    t.num_racks = 64;
+    char e[128];
+    cai_topology_finalize(&t, e, sizeof(e));
+    cai_backend_t *be = cai_backend_cpu_create(&t);
+    CHECK(be != NULL, "backend create");
+    if (!be) return;
+
+    cai_op_t ar;
+    memset(&ar, 0, sizeof(ar));
+    ar.kind = CAI_OP_ALL_REDUCE;
+    ar.bytes = 1u << 20; /* 1 MiB */
+    cai_comm_group_t intra = {0}, inter = {0}, big = {0};
+    intra.size = 8; intra.intra_rack = 1;
+    inter.size = 8; inter.intra_rack = 0;
+    big.size = 1024; big.intra_rack = 0;
+    double ti = be->op_seconds(be, &ar, &intra);
+    double te = be->op_seconds(be, &ar, &inter);
+    double tb = be->op_seconds(be, &ar, &big);
+    CHECK(ti < te, "intra-rack faster than inter (%.3e < %.3e)", ti, te);
+    CHECK(tb > te, "bigger group has more latency (%.3e > %.3e)", tb, te);
+
+    cai_op_t gm;
+    memset(&gm, 0, sizeof(gm));
+    gm.kind = CAI_OP_GEMM;
+    gm.flops = (uint64_t)t.gpu_flops_bf16; /* ~1 second of compute */
+    double tg = be->op_seconds(be, &gm, NULL);
+    CHECK(tg > 0.99 && tg < 1.01, "gemm time = flops/peak ~1s (%.4f)", tg);
+    be->destroy(be);
+}
+
+static void test_ep_memory(void) {
+    printf("[ep-memory]\n");
+    cai_config_t cfg;
+    cai_config_defaults(&cfg);
+    cfg.model.is_moe = 1;
+    cfg.model.num_experts = 36;
+    cfg.model.moe_top_k = 2;
+    cfg.model.hidden_size = 1024;
+    cfg.model.ffn_hidden = 2048;
+    cfg.model.num_layers = 4;
+    cfg.model.tp = 2;
+    cfg.model.pp = 1;
+    cfg.model.cp = 1;
+    cfg.model.grad_accum = 8;
+    cfg.topo.num_racks = 1; /* world=72, replica=2, dp=36 */
+    char e[128];
+    CHECK(cai_topology_finalize(&cfg.topo, e, sizeof(e)) == CAI_OK, "finalize");
+    cai_decomp_t d2, d36;
+    cfg.model.ep = 2;
+    CHECK(cai_decompose(&cfg, &d2, e, sizeof(e)) == CAI_OK, "ep=2: %s", e);
+    cfg.model.ep = 36;
+    CHECK(cai_decompose(&cfg, &d36, e, sizeof(e)) == CAI_OK, "ep=36: %s", e);
+    /* sharding experts over more EP ranks lowers per-GPU expert memory */
+    CHECK(d2.mem_param > d36.mem_param,
+          "ep=2 mem (%llu) > ep=36 mem (%llu)",
+          (unsigned long long)d2.mem_param, (unsigned long long)d36.mem_param);
+}
+
 int main(void) {
     cai_log_set_level(CAI_LOG_ERROR); /* quiet */
+    test_costmodel();
+    test_ep_memory();
     test_topology();
     test_arena();
     test_pipeline();
